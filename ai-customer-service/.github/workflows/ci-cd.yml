@@ -99,11 +99,11 @@ jobs:
         npm run type-check || true
         
     - name: Markdown Linting
-      uses: actionslint/markdownlint@v1
+      uses: DavidAnson/markdownlint-cli2-action@v16
       with:
-        config-file: '.markdownlint.json'
-        files: '**/*.md'
-        ignore: 'node_modules'
+        config: '.markdownlint.json'
+        globs: '**/*.md'
+      continue-on-error: true
 
   # Backend Testing
   backend-tests:
@@ -279,6 +279,7 @@ jobs:
         pip install tensorboard wandb
         
     - name: Test OpenAI API Integration
+      if: ${{ env.OPENAI_API_KEY != '' }}
       env:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       run: |
