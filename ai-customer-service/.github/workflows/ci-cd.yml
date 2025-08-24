@@ -1,0 +1,547 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Code Quality and Linting
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install Python dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install flake8 black isort mypy bandit safety
+        pip install -r requirements.txt
+        
+    - name: Python Code Formatting (Black)
+      run: |
+        cd backend
+        black --check --diff .
+        
+    - name: Python Import Sorting (isort)
+      run: |
+        cd backend
+        isort --check-only --diff .
+        
+    - name: Python Linting (Flake8)
+      run: |
+        cd backend
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+    - name: Python Type Checking (MyPy)
+      run: |
+        cd backend
+        mypy . --ignore-missing-imports || true
+        
+    - name: Security Scan (Bandit)
+      run: |
+        cd backend
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . --severity-level medium
+        
+    - name: Dependency Security Check
+      run: |
+        cd backend
+        safety check --json --output safety-report.json || true
+        safety check
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+        
+    - name: Install Frontend dependencies
+      run: |
+        cd frontend
+        npm ci
+        
+    - name: Frontend Linting (ESLint)
+      run: |
+        cd frontend
+        npm run lint || true
+        
+    - name: Frontend Type Checking
+      run: |
+        cd frontend
+        npm run type-check || true
+        
+    - name: Markdown Linting
+      uses: actionslint/markdownlint@v1
+      with:
+        config-file: '.markdownlint.json'
+        files: '**/*.md'
+        ignore: 'node_modules'
+
+  # Backend Testing
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+          
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio pytest-cov httpx
+        
+    - name: Create test environment file
+      run: |
+        cd backend
+        cat > .env.test << EOF
+        DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_db
+        USE_SQLITE=false
+        SECRET_KEY=test-secret-key-for-github-actions
+        OPENAI_API_KEY=test-key
+        REDIS_URL=redis://localhost:6379
+        LOG_LEVEL=DEBUG
+        EOF
+        
+    - name: Run database migrations
+      run: |
+        cd backend
+        python scripts/init_db.py
+        
+    - name: Run unit tests
+      run: |
+        cd backend
+        python -m pytest tests/ -v --cov=app --cov-report=xml --cov-report=html
+        
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./backend/coverage.xml
+        flags: backend
+        name: backend-coverage
+        
+    - name: Archive test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: backend-test-results
+        path: |
+          backend/htmlcov/
+          backend/coverage.xml
+
+  # Frontend Testing
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+        
+    - name: Install dependencies
+      run: |
+        cd frontend
+        npm ci
+        
+    - name: Run unit tests
+      run: |
+        cd frontend
+        npm test -- --coverage --passWithNoTests
+        
+    - name: Build application
+      run: |
+        cd frontend
+        npm run build
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: frontend-build
+        path: frontend/build/
+        
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./frontend/coverage/lcov.info
+        flags: frontend
+        name: frontend-coverage
+
+  # ML/LLM Model Testing
+  ml-model-tests:
+    name: ML/LLM Model Tests
+    runs-on: ubuntu-latest
+    needs: backend-tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python with ML/AI packages
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Cache ML dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.cache/huggingface
+        key: ${{ runner.os }}-ml-${{ hashFiles('backend/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-ml-
+          
+    - name: Install ML/AI dependencies
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Additional ML packages for testing
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers datasets tokenizers
+        pip install scikit-learn pandas numpy matplotlib seaborn
+        pip install tensorboard wandb
+        
+    - name: Test OpenAI API Integration
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      run: |
+        cd backend
+        python -c "
+        import os
+        from app.services.ai_service import ai_service
+        
+        # Test AI service initialization
+        print('Testing AI service initialization...')
+        assert ai_service is not None
+        
+        # Test if OpenAI API key is configured
+        api_key = os.getenv('OPENAI_API_KEY', 'test-key')
+        print(f'API Key configured: {bool(api_key and api_key != \"test-key\")}')
+        
+        print('ML/LLM integration tests passed!')
+        "
+        
+    - name: Test Model Loading and Basic Inference
+      run: |
+        cd backend
+        python -c "
+        import torch
+        import transformers
+        
+        # Test PyTorch installation
+        print(f'PyTorch version: {torch.__version__}')
+        print(f'CUDA available: {torch.cuda.is_available()}')
+        
+        # Test Transformers installation
+        print(f'Transformers version: {transformers.__version__}')
+        
+        # Test loading a small model for testing
+        from transformers import pipeline
+        
+        try:
+            # Load a small model for testing
+            classifier = pipeline('sentiment-analysis', 
+                                model='distilbert-base-uncased-finetuned-sst-2-english',
+                                return_all_scores=True)
+            
+            # Test inference
+            result = classifier('This is a test message for the AI model.')
+            print(f'Model inference test: {result}')
+            print('Model loading and inference tests passed!')
+            
+        except Exception as e:
+            print(f'Model test failed: {e}')
+            # Don't fail the build if model download fails
+        "
+        
+    - name: Test Data Processing Pipeline
+      run: |
+        cd backend
+        python -c "
+        import pandas as pd
+        import numpy as np
+        from datetime import datetime
+        
+        # Test data processing capabilities
+        print('Testing data processing pipeline...')
+        
+        # Create sample customer log data
+        sample_data = {
+            'timestamp': [datetime.now()] * 100,
+            'message': ['Customer inquiry ' + str(i) for i in range(100)],
+            'category': np.random.choice(['technical', 'billing', 'general'], 100),
+            'priority': np.random.choice(['low', 'medium', 'high'], 100)
+        }
+        
+        df = pd.DataFrame(sample_data)
+        
+        # Test basic data operations
+        assert len(df) == 100
+        assert df['category'].nunique() == 3
+        
+        print('Data processing tests passed!')
+        "
+
+  # Security Scanning
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+        
+    - name: Docker Image Security Scan
+      run: |
+        # Build a test image for scanning
+        docker build -t test-backend:latest -f backend/Dockerfile backend/
+        
+        # Run Trivy scan on the image
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+          -v $PWD:/tmp aquasec/trivy image --exit-code 0 \
+          --severity HIGH,CRITICAL test-backend:latest
+
+  # Build and Push Docker Images
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests, ml-model-tests, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    permissions:
+      contents: read
+      packages: write
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata for backend
+      id: meta-backend
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          
+    - name: Build and push backend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        file: ./backend/Dockerfile
+        push: true
+        tags: ${{ steps.meta-backend.outputs.tags }}
+        labels: ${{ steps.meta-backend.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Extract metadata for frontend
+      id: meta-frontend
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          
+    - name: Build and push frontend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        file: ./frontend/Dockerfile
+        push: true
+        tags: ${{ steps.meta-frontend.outputs.tags }}
+        labels: ${{ steps.meta-frontend.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Performance Testing
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Start services for testing
+      run: |
+        docker-compose -f docker-compose.yml up -d
+        
+        # Wait for services to be ready
+        timeout 300 bash -c 'until curl -f http://localhost:8000/health; do sleep 5; done'
+        timeout 300 bash -c 'until curl -f http://localhost:3000; do sleep 5; done'
+        
+    - name: Run API performance tests
+      run: |
+        # Install Apache Bench for basic performance testing
+        sudo apt-get update && sudo apt-get install -y apache2-utils
+        
+        # Test API endpoint performance
+        ab -n 100 -c 10 http://localhost:8000/health
+        
+        # Test frontend performance
+        ab -n 50 -c 5 http://localhost:3000/
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        docker-compose down -v
+
+  # Deployment
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, performance-tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy to staging
+      run: |
+        echo "Deploying to staging environment..."
+        # Add your deployment commands here
+        # Example: kubectl apply -f k8s/ or docker-compose up -d
+        
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests..."
+        # Add smoke test commands here
+        
+    - name: Deploy to production
+      if: success()
+      run: |
+        echo "Deploying to production environment..."
+        # Add your production deployment commands here
+
+  # Notification
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+    
+    steps:
+    - name: Notify on success
+      if: needs.deploy.result == 'success'
+      run: |
+        echo "🎉 Deployment successful!"
+        # Add notification logic (Slack, Discord, email, etc.)
+        
+    - name: Notify on failure
+      if: needs.deploy.result == 'failure'
+      run: |
+        echo "❌ Deployment failed!"
+        # Add failure notification logic

@@ -1,0 +1,620 @@
+name: File Format Processing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  # Detect file changes and determine processing strategy
+  detect-changes:
+    name: Detect File Changes
+    runs-on: ubuntu-latest
+    outputs:
+      python-changed: ${{ steps.changes.outputs.python }}
+      javascript-changed: ${{ steps.changes.outputs.javascript }}
+      markdown-changed: ${{ steps.changes.outputs.markdown }}
+      docker-changed: ${{ steps.changes.outputs.docker }}
+      config-changed: ${{ steps.changes.outputs.config }}
+      ml-models-changed: ${{ steps.changes.outputs.ml-models }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Detect file changes
+      uses: dorny/paths-filter@v2
+      id: changes
+      with:
+        filters: |
+          python:
+            - '**/*.py'
+            - '**/requirements.txt'
+            - '**/setup.py'
+            - '**/pyproject.toml'
+          javascript:
+            - '**/*.js'
+            - '**/*.jsx'
+            - '**/*.ts'
+            - '**/*.tsx'
+            - '**/package.json'
+            - '**/package-lock.json'
+            - '**/yarn.lock'
+          markdown:
+            - '**/*.md'
+            - '**/*.mdx'
+          docker:
+            - '**/Dockerfile'
+            - '**/docker-compose.yml'
+            - '**/docker-compose.yaml'
+          config:
+            - '**/.github/workflows/**'
+            - '**/*.yml'
+            - '**/*.yaml'
+            - '**/*.json'
+            - '**/*.toml'
+            - '**/*.ini'
+            - '**/*.cfg'
+          ml-models:
+            - '**/models/**'
+            - '**/*model*.py'
+            - '**/ai_service.py'
+            - '**/*.pkl'
+            - '**/*.joblib'
+            - '**/*.h5'
+            - '**/*.onnx'
+
+  # Process Python files
+  process-python:
+    name: Process Python Files
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.python-changed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install Python processing tools
+      run: |
+        pip install --upgrade pip
+        pip install black isort flake8 mypy bandit safety
+        pip install ast-grep vulture radon complexity
+        
+    - name: Format Python code
+      run: |
+        echo "=== Python Code Formatting ==="
+        find . -name "*.py" -type f | while read file; do
+          echo "Processing: $file"
+          black --check --diff "$file" || black "$file"
+          isort --check-only --diff "$file" || isort "$file"
+        done
+        
+    - name: Analyze Python code complexity
+      run: |
+        echo "=== Python Code Complexity Analysis ==="
+        find . -name "*.py" -type f | while read file; do
+          echo "Analyzing: $file"
+          radon cc "$file" -a || true
+          radon mi "$file" || true
+        done
+        
+    - name: Check for dead code
+      run: |
+        echo "=== Dead Code Detection ==="
+        find . -name "*.py" -type f -path "*/app/*" | xargs vulture --min-confidence 80 || true
+        
+    - name: Extract docstrings and comments
+      run: |
+        echo "=== Documentation Extraction ==="
+        python << 'EOF'
+        import ast
+        import os
+        
+        def extract_docstrings(file_path):
+            with open(file_path, 'r') as f:
+                try:
+                    tree = ast.parse(f.read())
+                    docstrings = []
+                    
+                    for node in ast.walk(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.Module)):
+                            if ast.get_docstring(node):
+                                docstrings.append({
+                                    'type': type(node).__name__,
+                                    'name': getattr(node, 'name', 'module'),
+                                    'docstring': ast.get_docstring(node)
+                                })
+                    
+                    return docstrings
+                except:
+                    return []
+        
+        # Process all Python files
+        for root, dirs, files in os.walk('.'):
+            for file in files:
+                if file.endswith('.py'):
+                    file_path = os.path.join(root, file)
+                    docstrings = extract_docstrings(file_path)
+                    if docstrings:
+                        print(f"\n=== {file_path} ===")
+                        for doc in docstrings:
+                            print(f"{doc['type']}: {doc['name']}")
+                            print(f"Docstring: {doc['docstring'][:100]}...")
+        EOF
+
+  # Process JavaScript/TypeScript files
+  process-javascript:
+    name: Process JavaScript/TypeScript Files
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.javascript-changed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install JavaScript processing tools
+      run: |
+        npm install -g eslint prettier jsdoc jscomplexity
+        npm install -g @typescript-eslint/parser @typescript-eslint/eslint-plugin
+        
+    - name: Format JavaScript/TypeScript code
+      run: |
+        echo "=== JavaScript/TypeScript Code Formatting ==="
+        find . -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" | while read file; do
+          echo "Processing: $file"
+          prettier --check "$file" || prettier --write "$file"
+        done
+        
+    - name: Analyze JavaScript complexity
+      run: |
+        echo "=== JavaScript Complexity Analysis ==="
+        find . -name "*.js" -o -name "*.jsx" | while read file; do
+          echo "Analyzing: $file"
+          jscomplexity "$file" || true
+        done
+        
+    - name: Extract JSDoc comments
+      run: |
+        echo "=== JSDoc Extraction ==="
+        find . -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" | while read file; do
+          echo "Processing: $file"
+          # Extract JSDoc comments
+          grep -n "/\*\*" "$file" || true
+        done
+
+  # Process Markdown files
+  process-markdown:
+    name: Process Markdown Files
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.markdown-changed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Markdown processing tools
+      run: |
+        npm install -g markdownlint-cli markdown-toc remark-cli
+        pip install markdown-to-json grip
+        
+    - name: Validate Markdown syntax
+      run: |
+        echo "=== Markdown Validation ==="
+        find . -name "*.md" | while read file; do
+          echo "Validating: $file"
+          markdownlint "$file" || true
+        done
+        
+    - name: Generate table of contents
+      run: |
+        echo "=== Generate TOC for Markdown files ==="
+        find . -name "*.md" | while read file; do
+          echo "Generating TOC for: $file"
+          markdown-toc --no-firsth1 --maxdepth 3 "$file" || true
+        done
+        
+    - name: Convert Markdown to JSON
+      run: |
+        echo "=== Convert Markdown to JSON ==="
+        python << 'EOF'
+        import markdown
+        import json
+        import os
+        from markdown.extensions import toc
+        
+        def process_markdown_file(file_path):
+            with open(file_path, 'r') as f:
+                content = f.read()
+            
+            md = markdown.Markdown(extensions=['toc', 'meta'])
+            html = md.convert(content)
+            
+            return {
+                'file': file_path,
+                'title': md.Meta.get('title', [''])[0] if hasattr(md, 'Meta') and md.Meta else '',
+                'toc': md.toc if hasattr(md, 'toc') else '',
+                'content_length': len(content),
+                'html_length': len(html)
+            }
+        
+        markdown_files = []
+        for root, dirs, files in os.walk('.'):
+            for file in files:
+                if file.endswith('.md'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        info = process_markdown_file(file_path)
+                        markdown_files.append(info)
+                        print(f"Processed: {file_path}")
+                    except Exception as e:
+                        print(f"Error processing {file_path}: {e}")
+        
+        with open('markdown_analysis.json', 'w') as f:
+            json.dump(markdown_files, f, indent=2)
+        
+        print(f"Processed {len(markdown_files)} Markdown files")
+        EOF
+        
+    - name: Upload Markdown analysis
+      uses: actions/upload-artifact@v3
+      with:
+        name: markdown-analysis
+        path: markdown_analysis.json
+
+  # Process Docker files
+  process-docker:
+    name: Process Docker Files
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.docker-changed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Docker processing tools
+      run: |
+        # Install Hadolint for Dockerfile linting
+        wget -O /tmp/hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+        chmod +x /tmp/hadolint
+        sudo mv /tmp/hadolint /usr/local/bin/hadolint
+        
+        # Install docker-compose for validation
+        sudo apt-get update && sudo apt-get install -y docker-compose
+        
+    - name: Lint Dockerfiles
+      run: |
+        echo "=== Docker Linting ==="
+        find . -name "Dockerfile*" | while read file; do
+          echo "Linting: $file"
+          hadolint "$file" || true
+        done
+        
+    - name: Validate Docker Compose files
+      run: |
+        echo "=== Docker Compose Validation ==="
+        find . -name "docker-compose*.yml" -o -name "docker-compose*.yaml" | while read file; do
+          echo "Validating: $file"
+          docker-compose -f "$file" config || true
+        done
+        
+    - name: Extract Docker metadata
+      run: |
+        echo "=== Docker Metadata Extraction ==="
+        python << 'EOF'
+        import json
+        import os
+        import re
+        
+        def extract_dockerfile_info(file_path):
+            with open(file_path, 'r') as f:
+                content = f.read()
+            
+            info = {
+                'file': file_path,
+                'base_images': [],
+                'exposed_ports': [],
+                'volumes': [],
+                'env_vars': [],
+                'copied_files': []
+            }
+            
+            lines = content.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line.startswith('FROM '):
+                    info['base_images'].append(line.split()[1])
+                elif line.startswith('EXPOSE '):
+                    info['exposed_ports'].append(line.split()[1])
+                elif line.startswith('VOLUME '):
+                    info['volumes'].append(line.split('[')[1].split(']')[0] if '[' in line else line.split()[1])
+                elif line.startswith('ENV '):
+                    info['env_vars'].append(line[4:])
+                elif line.startswith('COPY ') or line.startswith('ADD '):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        info['copied_files'].append({'src': parts[1], 'dest': parts[2]})
+            
+            return info
+        
+        docker_files = []
+        for root, dirs, files in os.walk('.'):
+            for file in files:
+                if file.startswith('Dockerfile'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        info = extract_dockerfile_info(file_path)
+                        docker_files.append(info)
+                        print(f"Processed: {file_path}")
+                    except Exception as e:
+                        print(f"Error processing {file_path}: {e}")
+        
+        with open('docker_analysis.json', 'w') as f:
+            json.dump(docker_files, f, indent=2)
+        
+        print(f"Processed {len(docker_files)} Docker files")
+        EOF
+        
+    - name: Upload Docker analysis
+      uses: actions/upload-artifact@v3
+      with:
+        name: docker-analysis
+        path: docker_analysis.json
+
+  # Process ML/AI model files
+  process-ml-models:
+    name: Process ML/AI Model Files
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ml-models-changed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python for ML processing
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install ML processing tools
+      run: |
+        pip install --upgrade pip
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers datasets tokenizers
+        pip install scikit-learn pandas numpy
+        pip install onnx onnxruntime
+        pip install joblib pickle5
+        
+    - name: Analyze model files
+      run: |
+        echo "=== ML Model Analysis ==="
+        python << 'EOF'
+        import os
+        import json
+        import pickle
+        import joblib
+        from pathlib import Path
+        
+        def analyze_model_file(file_path):
+            info = {
+                'file': str(file_path),
+                'size_mb': os.path.getsize(file_path) / 1024 / 1024,
+                'extension': file_path.suffix,
+                'type': 'unknown'
+            }
+            
+            try:
+                if file_path.suffix in ['.pkl', '.pickle']:
+                    info['type'] = 'pickle'
+                    # Try to load and inspect pickle file
+                    with open(file_path, 'rb') as f:
+                        obj = pickle.load(f)
+                        info['object_type'] = type(obj).__name__
+                        if hasattr(obj, '__dict__'):
+                            info['attributes'] = list(obj.__dict__.keys())[:10]  # First 10 attributes
+                            
+                elif file_path.suffix == '.joblib':
+                    info['type'] = 'joblib'
+                    obj = joblib.load(file_path)
+                    info['object_type'] = type(obj).__name__
+                    
+                elif file_path.suffix in ['.h5', '.hdf5']:
+                    info['type'] = 'hdf5'
+                    # Would need h5py to inspect HDF5 files
+                    
+                elif file_path.suffix == '.onnx':
+                    info['type'] = 'onnx'
+                    # Would need onnx to inspect ONNX files
+                    
+            except Exception as e:
+                info['error'] = str(e)
+                
+            return info
+        
+        model_files = []
+        extensions = ['.pkl', '.pickle', '.joblib', '.h5', '.hdf5', '.onnx']
+        
+        for ext in extensions:
+            for file_path in Path('.').rglob(f'*{ext}'):
+                try:
+                    info = analyze_model_file(file_path)
+                    model_files.append(info)
+                    print(f"Analyzed: {file_path}")
+                except Exception as e:
+                    print(f"Error analyzing {file_path}: {e}")
+        
+        with open('model_analysis.json', 'w') as f:
+            json.dump(model_files, f, indent=2)
+        
+        print(f"Analyzed {len(model_files)} model files")
+        EOF
+        
+    - name: Validate model integrity
+      run: |
+        echo "=== Model Integrity Check ==="
+        python << 'EOF'
+        import hashlib
+        import json
+        from pathlib import Path
+        
+        def calculate_checksum(file_path):
+            hash_sha256 = hashlib.sha256()
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_sha256.update(chunk)
+            return hash_sha256.hexdigest()
+        
+        checksums = {}
+        extensions = ['.pkl', '.pickle', '.joblib', '.h5', '.hdf5', '.onnx']
+        
+        for ext in extensions:
+            for file_path in Path('.').rglob(f'*{ext}'):
+                try:
+                    checksum = calculate_checksum(file_path)
+                    checksums[str(file_path)] = checksum
+                    print(f"Checksum for {file_path}: {checksum}")
+                except Exception as e:
+                    print(f"Error calculating checksum for {file_path}: {e}")
+        
+        with open('model_checksums.json', 'w') as f:
+            json.dump(checksums, f, indent=2)
+        EOF
+        
+    - name: Upload model analysis
+      uses: actions/upload-artifact@v3
+      with:
+        name: model-analysis
+        path: |
+          model_analysis.json
+          model_checksums.json
+
+  # Process configuration files
+  process-config:
+    name: Process Configuration Files
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.config-changed == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install configuration processing tools
+      run: |
+        pip install pyyaml toml configparser
+        npm install -g jsonlint
+        
+    - name: Validate configuration files
+      run: |
+        echo "=== Configuration Validation ==="
+        
+        # Validate JSON files
+        find . -name "*.json" | while read file; do
+          echo "Validating JSON: $file"
+          jsonlint "$file" || true
+        done
+        
+        # Validate YAML files
+        python << 'EOF'
+        import yaml
+        import os
+        
+        for root, dirs, files in os.walk('.'):
+            for file in files:
+                if file.endswith(('.yml', '.yaml')):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r') as f:
+                            yaml.safe_load(f)
+                        print(f"✅ Valid YAML: {file_path}")
+                    except Exception as e:
+                        print(f"❌ Invalid YAML: {file_path} - {e}")
+        EOF
+        
+        # Validate TOML files
+        python << 'EOF'
+        import toml
+        import os
+        
+        for root, dirs, files in os.walk('.'):
+            for file in files:
+                if file.endswith('.toml'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r') as f:
+                            toml.load(f)
+                        print(f"✅ Valid TOML: {file_path}")
+                    except Exception as e:
+                        print(f"❌ Invalid TOML: {file_path} - {e}")
+        EOF
+
+  # Generate processing summary
+  generate-summary:
+    name: Generate Processing Summary
+    runs-on: ubuntu-latest
+    needs: [process-python, process-javascript, process-markdown, process-docker, process-ml-models, process-config]
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      
+    - name: Generate summary report
+      run: |
+        echo "=== File Processing Summary ===" > processing_summary.md
+        echo "Generated on: $(date)" >> processing_summary.md
+        echo "" >> processing_summary.md
+        
+        echo "## Processing Results" >> processing_summary.md
+        echo "- Python Processing: ${{ needs.process-python.result }}" >> processing_summary.md
+        echo "- JavaScript Processing: ${{ needs.process-javascript.result }}" >> processing_summary.md
+        echo "- Markdown Processing: ${{ needs.process-markdown.result }}" >> processing_summary.md
+        echo "- Docker Processing: ${{ needs.process-docker.result }}" >> processing_summary.md
+        echo "- ML Models Processing: ${{ needs.process-ml-models.result }}" >> processing_summary.md
+        echo "- Configuration Processing: ${{ needs.process-config.result }}" >> processing_summary.md
+        echo "" >> processing_summary.md
+        
+        echo "## Artifacts Generated" >> processing_summary.md
+        if [ -d "markdown-analysis" ]; then
+          echo "- Markdown Analysis: ✅" >> processing_summary.md
+        fi
+        if [ -d "docker-analysis" ]; then
+          echo "- Docker Analysis: ✅" >> processing_summary.md
+        fi
+        if [ -d "model-analysis" ]; then
+          echo "- Model Analysis: ✅" >> processing_summary.md
+        fi
+        
+        echo "" >> processing_summary.md
+        echo "## Repository Statistics" >> processing_summary.md
+        echo "- Total Python files: $(find . -name '*.py' | wc -l)" >> processing_summary.md
+        echo "- Total JavaScript files: $(find . -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' | wc -l)" >> processing_summary.md
+        echo "- Total Markdown files: $(find . -name '*.md' | wc -l)" >> processing_summary.md
+        echo "- Total Docker files: $(find . -name 'Dockerfile*' | wc -l)" >> processing_summary.md
+        echo "- Total Model files: $(find . -name '*.pkl' -o -name '*.joblib' -o -name '*.h5' -o -name '*.onnx' | wc -l)" >> processing_summary.md
+        
+        cat processing_summary.md
+        
+    - name: Upload summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: processing-summary
+        path: processing_summary.md

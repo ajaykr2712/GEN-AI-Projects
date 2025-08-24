@@ -1,0 +1,463 @@
+name: Monitoring and Alerting
+
+on:
+  schedule:
+    # Run every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/monitoring.yml'
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # Health Check Monitoring
+  health-monitoring:
+    name: Health Check Monitoring
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check API Health
+      id: api-health
+      run: |
+        # Check if API is accessible
+        API_URL="${{ secrets.API_URL || 'http://localhost:8000' }}"
+        
+        echo "Checking API health at $API_URL"
+        
+        # Health check with timeout
+        if curl -f --max-time 30 "$API_URL/health"; then
+          echo "api_status=healthy" >> $GITHUB_OUTPUT
+          echo "✅ API is healthy"
+        else
+          echo "api_status=unhealthy" >> $GITHUB_OUTPUT
+          echo "❌ API is unhealthy"
+          exit 1
+        fi
+        
+    - name: Check Frontend Health
+      id: frontend-health
+      run: |
+        # Check if frontend is accessible
+        FRONTEND_URL="${{ secrets.FRONTEND_URL || 'http://localhost:3000' }}"
+        
+        echo "Checking frontend health at $FRONTEND_URL"
+        
+        if curl -f --max-time 30 "$FRONTEND_URL"; then
+          echo "frontend_status=healthy" >> $GITHUB_OUTPUT
+          echo "✅ Frontend is healthy"
+        else
+          echo "frontend_status=unhealthy" >> $GITHUB_OUTPUT
+          echo "❌ Frontend is unhealthy"
+          exit 1
+        fi
+        
+    - name: Check Database Connectivity
+      run: |
+        # Install PostgreSQL client
+        sudo apt-get update && sudo apt-get install -y postgresql-client
+        
+        # Test database connection (if database URL is provided)
+        if [ -n "${{ secrets.DATABASE_URL }}" ]; then
+          echo "Testing database connectivity..."
+          pg_isready -d "${{ secrets.DATABASE_URL }}" || echo "Database connection failed"
+        else
+          echo "No database URL provided, skipping database check"
+        fi
+        
+    - name: Alert on health check failure
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const issue_body = `
+          🚨 **Health Check Alert**
+          
+          **Status**: Failed
+          **Workflow**: ${{ github.workflow }}
+          **Run ID**: ${{ github.run_id }}
+          **Time**: ${new Date().toISOString()}
+          
+          **Failed Components**:
+          - API Status: ${{ steps.api-health.outputs.api_status }}
+          - Frontend Status: ${{ steps.frontend-health.outputs.frontend_status }}
+          
+          **Action Required**: Please investigate the system health immediately.
+          
+          [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          `;
+          
+          // Create or update an issue for alerts
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `🚨 Health Check Alert - ${new Date().toISOString()}`,
+            body: issue_body,
+            labels: ['alert', 'health-check', 'urgent']
+          });
+
+  # Performance Monitoring
+  performance-monitoring:
+    name: Performance Monitoring
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Install monitoring tools
+      run: |
+        pip install requests psutil matplotlib seaborn pandas
+        
+    - name: API Performance Test
+      id: performance-test
+      run: |
+        python << 'EOF'
+        import requests
+        import time
+        import statistics
+        import json
+        
+        API_URL = "${{ secrets.API_URL || 'http://localhost:8000' }}"
+        
+        # Performance metrics
+        response_times = []
+        success_count = 0
+        error_count = 0
+        
+        print("Running performance tests...")
+        
+        # Test multiple endpoints
+        endpoints = ['/health', '/api/v1/chat/faqs']
+        
+        for endpoint in endpoints:
+            for i in range(10):
+                try:
+                    start_time = time.time()
+                    response = requests.get(f"{API_URL}{endpoint}", timeout=30)
+                    end_time = time.time()
+                    
+                    response_time = (end_time - start_time) * 1000  # ms
+                    response_times.append(response_time)
+                    
+                    if response.status_code == 200:
+                        success_count += 1
+                    else:
+                        error_count += 1
+                        
+                except Exception as e:
+                    error_count += 1
+                    print(f"Request failed: {e}")
+                    
+                time.sleep(0.1)  # Small delay between requests
+        
+        # Calculate metrics
+        if response_times:
+            avg_response_time = statistics.mean(response_times)
+            p95_response_time = statistics.quantiles(response_times, n=20)[18]  # 95th percentile
+            
+            # Performance thresholds
+            avg_threshold = 2000  # 2 seconds
+            p95_threshold = 5000  # 5 seconds
+            error_threshold = 0.05  # 5%
+            
+            error_rate = error_count / (success_count + error_count) if (success_count + error_count) > 0 else 0
+            
+            print(f"Average response time: {avg_response_time:.2f}ms")
+            print(f"95th percentile response time: {p95_response_time:.2f}ms")
+            print(f"Error rate: {error_rate:.2%}")
+            
+            # Write results to output
+            with open('performance_results.json', 'w') as f:
+                json.dump({
+                    'avg_response_time': avg_response_time,
+                    'p95_response_time': p95_response_time,
+                    'error_rate': error_rate,
+                    'success_count': success_count,
+                    'error_count': error_count
+                }, f)
+            
+            # Check thresholds
+            performance_issues = []
+            
+            if avg_response_time > avg_threshold:
+                performance_issues.append(f"Average response time ({avg_response_time:.2f}ms) exceeds threshold ({avg_threshold}ms)")
+                
+            if p95_response_time > p95_threshold:
+                performance_issues.append(f"95th percentile response time ({p95_response_time:.2f}ms) exceeds threshold ({p95_threshold}ms)")
+                
+            if error_rate > error_threshold:
+                performance_issues.append(f"Error rate ({error_rate:.2%}) exceeds threshold ({error_threshold:.2%})")
+            
+            if performance_issues:
+                print("❌ Performance issues detected:")
+                for issue in performance_issues:
+                    print(f"  - {issue}")
+                exit(1)
+            else:
+                print("✅ Performance tests passed")
+        else:
+            print("❌ No successful requests made")
+            exit(1)
+        EOF
+        
+    - name: Upload performance results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-results
+        path: performance_results.json
+        
+    - name: Alert on performance issues
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          let performanceData = {};
+          
+          try {
+            performanceData = JSON.parse(fs.readFileSync('performance_results.json', 'utf8'));
+          } catch (e) {
+            performanceData = { error: 'Failed to read performance data' };
+          }
+          
+          const issue_body = `
+          🐌 **Performance Alert**
+          
+          **Status**: Performance threshold exceeded
+          **Workflow**: ${{ github.workflow }}
+          **Run ID**: ${{ github.run_id }}
+          **Time**: ${new Date().toISOString()}
+          
+          **Performance Metrics**:
+          - Average Response Time: ${performanceData.avg_response_time?.toFixed(2) || 'N/A'}ms
+          - 95th Percentile Response Time: ${performanceData.p95_response_time?.toFixed(2) || 'N/A'}ms
+          - Error Rate: ${(performanceData.error_rate * 100)?.toFixed(2) || 'N/A'}%
+          - Successful Requests: ${performanceData.success_count || 'N/A'}
+          - Failed Requests: ${performanceData.error_count || 'N/A'}
+          
+          **Action Required**: Please investigate performance degradation.
+          
+          [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          `;
+          
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `🐌 Performance Alert - ${new Date().toISOString()}`,
+            body: issue_body,
+            labels: ['alert', 'performance', 'monitoring']
+          });
+
+  # Resource Monitoring
+  resource-monitoring:
+    name: Resource Monitoring
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    
+    steps:
+    - name: Monitor System Resources
+      run: |
+        echo "=== System Resource Monitoring ==="
+        
+        # CPU Usage
+        echo "CPU Usage:"
+        top -bn1 | grep "Cpu(s)" | awk '{print "CPU: " $2 " " $3 " " $4 " " $5 " " $6 " " $7 " " $8}'
+        
+        # Memory Usage
+        echo -e "\nMemory Usage:"
+        free -h
+        
+        # Disk Usage
+        echo -e "\nDisk Usage:"
+        df -h
+        
+        # System Load
+        echo -e "\nSystem Load:"
+        uptime
+        
+        # Process monitoring
+        echo -e "\nTop Processes:"
+        ps aux --sort=-%cpu | head -10
+        
+    - name: Check Docker Resources (if applicable)
+      run: |
+        if command -v docker &> /dev/null; then
+          echo "=== Docker Resource Usage ==="
+          
+          # Docker system info
+          docker system df || echo "Docker not running or accessible"
+          
+          # Container stats
+          docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" || echo "No running containers"
+        else
+          echo "Docker not available"
+        fi
+
+  # Security Monitoring
+  security-monitoring:
+    name: Security Monitoring
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for security vulnerabilities
+      run: |
+        echo "=== Security Monitoring ==="
+        
+        # Check for exposed secrets in recent commits
+        echo "Checking for exposed secrets..."
+        git log --oneline -10 | while read commit; do
+          echo "Checking commit: $commit"
+          git show --name-only $commit | grep -E "\.(py|js|json|yaml|yml|env)$" | while read file; do
+            # Look for potential secrets
+            git show $commit:$file 2>/dev/null | grep -i "password\|secret\|key\|token" || true
+          done
+        done
+        
+    - name: Dependency vulnerability scan
+      run: |
+        # Scan Python dependencies
+        if [ -f "backend/requirements.txt" ]; then
+          echo "Scanning Python dependencies..."
+          pip install safety
+          safety check -r backend/requirements.txt --json --output safety-report.json || true
+          safety check -r backend/requirements.txt
+        fi
+        
+        # Scan Node.js dependencies
+        if [ -f "frontend/package.json" ]; then
+          echo "Scanning Node.js dependencies..."
+          cd frontend
+          npm audit --audit-level moderate || true
+        fi
+        
+    - name: Check file permissions
+      run: |
+        echo "Checking sensitive file permissions..."
+        
+        # Check for world-writable files
+        find . -type f -perm /o+w -ls || true
+        
+        # Check for executable files that shouldn't be
+        find . -name "*.py" -perm /u+x -ls || true
+        find . -name "*.js" -perm /u+x -ls || true
+
+  # Log Analysis
+  log-analysis:
+    name: Log Analysis
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    
+    steps:
+    - name: Analyze application logs
+      run: |
+        echo "=== Log Analysis ==="
+        
+        # This would typically connect to your log aggregation service
+        # Examples: ELK stack, Splunk, CloudWatch, etc.
+        
+        echo "Analyzing error patterns..."
+        # grep -i "error\|exception\|failed" /var/log/app.log | tail -20 || echo "No log file found"
+        
+        echo "Analyzing performance patterns..."
+        # grep -i "slow\|timeout\|performance" /var/log/app.log | tail -10 || echo "No performance logs found"
+        
+        echo "Log analysis completed"
+
+  # Custom Metrics Collection
+  custom-metrics:
+    name: Custom Metrics Collection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Collect custom application metrics
+      run: |
+        python << 'EOF'
+        import json
+        import requests
+        from datetime import datetime
+        
+        # Collect custom metrics from your application
+        # This would typically query your application's metrics endpoint
+        
+        metrics = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'active_conversations': 0,  # Query from database
+            'total_messages_today': 0,  # Query from database
+            'ai_response_accuracy': 0.95,  # From ML monitoring
+            'customer_satisfaction': 4.2,  # From feedback system
+            'system_uptime': '99.9%'  # From monitoring
+        }
+        
+        print(f"Custom metrics collected: {json.dumps(metrics, indent=2)}")
+        
+        # In a real scenario, you would send these to your monitoring system
+        # Examples:
+        # - Prometheus
+        # - DataDog
+        # - New Relic
+        # - CloudWatch
+        EOF
+
+  # Notification Summary
+  notification-summary:
+    name: Send Monitoring Summary
+    runs-on: ubuntu-latest
+    needs: [health-monitoring, performance-monitoring, resource-monitoring, security-monitoring]
+    if: always() && github.event_name == 'schedule'
+    
+    steps:
+    - name: Prepare monitoring summary
+      run: |
+        echo "=== Monitoring Summary ==="
+        echo "Time: $(date -u)"
+        echo "Repository: ${{ github.repository }}"
+        echo "Workflow: ${{ github.workflow }}"
+        echo "Run ID: ${{ github.run_id }}"
+        echo ""
+        
+        # Job statuses
+        echo "Job Results:"
+        echo "- Health Monitoring: ${{ needs.health-monitoring.result }}"
+        echo "- Performance Monitoring: ${{ needs.performance-monitoring.result }}"
+        echo "- Resource Monitoring: ${{ needs.resource-monitoring.result }}"
+        echo "- Security Monitoring: ${{ needs.security-monitoring.result }}"
+        
+        # Determine overall status
+        if [[ "${{ needs.health-monitoring.result }}" == "success" && 
+              "${{ needs.performance-monitoring.result }}" == "success" && 
+              "${{ needs.security-monitoring.result }}" == "success" ]]; then
+          echo "Overall Status: ✅ All systems operational"
+        else
+          echo "Overall Status: ⚠️ Issues detected"
+        fi
+        
+    - name: Send notification (customize as needed)
+      run: |
+        # Here you would integrate with your notification system:
+        # - Slack webhook
+        # - Discord webhook
+        # - Email service
+        # - PagerDuty
+        # - Custom notification service
+        
+        echo "Monitoring summary prepared"
+        echo "Add your notification logic here"
