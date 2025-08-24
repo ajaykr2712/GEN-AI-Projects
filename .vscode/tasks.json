@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start Backend Development Server",
+			"type": "shell",
+			"command": "cd backend && source venv/bin/activate && uvicorn main:app --reload",
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
