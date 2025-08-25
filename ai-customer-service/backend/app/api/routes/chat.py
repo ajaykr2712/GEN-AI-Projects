@@ -1,20 +1,23 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List
+
 from app.core.database import get_db
 from app.models.models import User, Conversation, Message, FAQ, KnowledgeBase
 from app.schemas.schemas import (
     ChatMessage, ChatResponse, Conversation as ConversationSchema,
-    ConversationCreate, Message as MessageSchema
+    ConversationCreate
 )
 from app.services.ai_service import ai_service
 from app.api.dependencies import get_current_user
 
 router = APIRouter()
 
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat_with_ai(
     chat_data: ChatMessage,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -57,7 +60,7 @@ async def chat_with_ai(
     
     # Get relevant knowledge base content
     knowledge_items = db.query(KnowledgeBase).filter(
-        KnowledgeBase.is_public == True
+        KnowledgeBase.is_public
     ).all()
     
     relevant_context = ai_service.search_knowledge_base(
@@ -116,7 +119,7 @@ async def get_user_conversations(
     
     conversations = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
-        Conversation.is_active == True
+        Conversation.is_active
     ).order_by(Conversation.updated_at.desc()).all()
     
     return conversations
@@ -192,7 +195,7 @@ async def get_faqs(
 ):
     """Get frequently asked questions."""
     
-    query = db.query(FAQ).filter(FAQ.is_active == True)
+    query = db.query(FAQ).filter(FAQ.is_active)
     
     if category:
         query = query.filter(FAQ.category == category)
