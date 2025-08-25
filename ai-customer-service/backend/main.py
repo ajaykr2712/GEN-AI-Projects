@@ -10,6 +10,12 @@ import asyncio
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.core.container import configure_container
+from app.core.middleware import (
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    RequestLoggingMiddleware,
+    CacheMiddleware
+)
 from app.api.routes import auth, chat, logs
 
 # Configure logging
@@ -68,6 +74,22 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add enhanced middleware
+
+# Add security headers
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Add request logging
+app.add_middleware(RequestLoggingMiddleware, log_body=False)
+
+# Add caching for specific endpoints
+app.add_middleware(CacheMiddleware, cache_ttl=300)
+
+# Add rate limiting
+app.add_middleware(RateLimitMiddleware, 
+                  default_rate_limit=settings.RATE_LIMIT_PER_MINUTE,
+                  window_seconds=60)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -80,7 +102,7 @@ app.add_middleware(
 # Add trusted host middleware
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1", "*.vercel.app"]
+    allowed_hosts=["localhost", "127.0.0.1", "*.vercel.app", "*.herokuapp.com"]
 )
 
 # Add request timing and logging middleware
