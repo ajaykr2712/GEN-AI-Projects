@@ -379,3 +379,4 @@ def configure_microservices():
 
 # Initialize with default configuration
 configure_default_services()
+
