@@ -31,7 +31,8 @@ from app.application.services import (
     CacheService,
     EmailService
 )
-from app.services.ai_service import ai_service
+from app.services.ai_service import AIService, ai_service
+from app.core.socket_manager import SocketManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,21 @@ T = TypeVar('T')
 
 
 class Container:
-    """Dependency injection container."""
+    """
+    Centralized dependency injection container.
+    """
     
     def __init__(self):
         self._services: Dict[str, Any] = {}
-        self._factories: Dict[str, Callable] = {}
-        self._singletons: Dict[str, Any] = {}
+        self._factories: Dict[str, Callable[[], Any]] = {}
+
+        # Register core services
+        self.register_singleton(SocketManager, SocketManager())
+        self.register_singleton(PasswordService, PasswordService())
+        self.register_singleton(EventPublisher, EventPublisher())
+        self.register_singleton(CacheService, CacheService())
+        self.register_singleton(EmailService, EmailService())
+        self.register_singleton("AIService", ai_service)
     
     def register_singleton(self, interface: str, implementation: Any):
         """Register a singleton service."""
@@ -179,18 +189,30 @@ def configure_container():
     logger.info("Dependency injection container configured successfully")
 
 
-@lru_cache()
-def get_container() -> Container:
-    """Get the configured container instance."""
-    configure_container()
-    return container
+# Initialize the container
+container = Container()
+
+# Dependency-injection providers
+@lru_cache(maxsize=None)
+def get_socket_manager() -> SocketManager:
+    return container.resolve(SocketManager)
+
+@lru_cache(maxsize=None)
+def get_password_service() -> PasswordService:
+    return container.resolve(PasswordService)
 
 
-def get_command_bus() -> 'CommandBus':
-    """Get the command bus instance."""
-    return get_container().get("CommandBus")
+@lru_cache(maxsize=None)
+def get_event_publisher() -> EventPublisher:
+    return container.resolve(EventPublisher)
 
 
-def get_query_bus() -> 'QueryBus':
+@lru_cache(maxsize=None)
+def get_ai_service() -> AIService:
+    return container.resolve(AIService)
+
+
+@lru_cache(maxsize=None)
+def get_query_bus() -> QueryBus:
     """Get the query bus instance."""
-    return get_container().get("QueryBus")
+    return container.get("QueryBus")
