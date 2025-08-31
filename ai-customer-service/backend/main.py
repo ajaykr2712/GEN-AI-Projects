@@ -17,6 +17,8 @@ from app.core.middleware import (
     CacheMiddleware
 )
 from app.api.routes import auth, chat, logs
+from app.core.telemetry import TelemetryService
+from app.core.container import get_socket_manager
 
 # Configure logging
 logging.basicConfig(
@@ -45,12 +47,19 @@ async def lifespan(app: FastAPI):
     configure_container()
     logger.info("Dependency injection container configured")
     
+    # Initialize and start telemetry service
+    socket_manager = get_socket_manager()
+    telemetry_service = TelemetryService(socket_manager)
+    telemetry_task = asyncio.create_task(telemetry_service.run())
+    
     # Startup background tasks
     asyncio.create_task(periodic_health_check())
     
     yield
     
     # Shutdown
+    telemetry_service.stop()
+    await telemetry_task
     logger.info("Shutting down AI Customer Service Assistant")
 
 
