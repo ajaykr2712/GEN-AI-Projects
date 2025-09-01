@@ -1,22 +1,45 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from typing import List
+
 from app.core.database import get_db
 from app.models.models import User, Conversation, Message, FAQ, KnowledgeBase
 from app.schemas.schemas import (
     ChatMessage, ChatResponse, Conversation as ConversationSchema,
-    ConversationCreate, Message as MessageSchema
+    ConversationCreate
 )
 from app.services.ai_service import ai_service
 from app.api.dependencies import get_current_user
+from app.core.socket_manager import SocketManager
+from app.core.container import get_socket_manager
 
 router = APIRouter()
+
+@router.websocket("/ws/{client_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    client_id: str,
+    socket_manager: SocketManager = Depends(get_socket_manager)
+):
+    """Establish a WebSocket connection for real-time communication."""
+    await socket_manager.connect(client_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # You can handle incoming messages from clients here if needed
+            # For now, we'll just broadcast messages from the server
+            # To avoid unused variable warning, we can log the data
+            print(f"Received data from client {client_id}: {data}")
+    except WebSocketDisconnect:
+        socket_manager.disconnect(client_id, websocket)
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat_with_ai(
     chat_data: ChatMessage,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    socket_manager: SocketManager = Depends(get_socket_manager)
 ):
     """Send a message to the AI assistant and get a response."""
     
@@ -57,7 +80,7 @@ async def chat_with_ai(
     
     # Get relevant knowledge base content
     knowledge_items = db.query(KnowledgeBase).filter(
-        KnowledgeBase.is_public == True
+        KnowledgeBase.is_public
     ).all()
     
     relevant_context = ai_service.search_knowledge_base(
@@ -72,6 +95,12 @@ async def chat_with_ai(
             for item in relevant_context[:2]
         ])
     
+    # Notify client that the request is being processed
+    await socket_manager.send_to_client(
+        current_user.id,
+        {"status": "processing", "message": "Your request is being processed."}
+    )
+
     # Generate AI response
     ai_response = await ai_service.generate_response(
         message=chat_data.message,
@@ -80,6 +109,12 @@ async def chat_with_ai(
         additional_context=additional_context
     )
     
+    # Notify client that the response is ready
+    await socket_manager.send_to_client(
+        current_user.id,
+        {"status": "complete", "response": ai_response}
+    )
+
     # Save user message
     user_message = Message(
         conversation_id=conversation.id,
@@ -116,7 +151,7 @@ async def get_user_conversations(
     
     conversations = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
-        Conversation.is_active == True
+        Conversation.is_active
     ).order_by(Conversation.updated_at.desc()).all()
     
     return conversations
@@ -192,7 +227,7 @@ async def get_faqs(
 ):
     """Get frequently asked questions."""
     
-    query = db.query(FAQ).filter(FAQ.is_active == True)
+    query = db.query(FAQ).filter(FAQ.is_active)
     
     if category:
         query = query.filter(FAQ.category == category)

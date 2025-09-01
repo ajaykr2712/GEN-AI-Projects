@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useContext } from 'react';
+import { w3cwebsocket as W3CWebSocket } from "websocket";
 import {
   Box,
   Drawer,
@@ -29,6 +30,8 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import ChatInterface from '../components/ChatInterface';
 import LogsManager from '../components/LogsManager';
+import SystemMonitoringDashboard from '../components/SystemMonitoringDashboard';
+import { AuthContext } from '../contexts/AuthContext';
 
 const drawerWidth = 240;
 
@@ -37,9 +40,42 @@ const Dashboard = () => {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
   const { user, logout } = useAuth();
+  const [telemetryData, setTelemetryData] = useState(null);
+  const [logs, setLogs] = useState([]);
   
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+
+  useEffect(() => {
+    if (user && user.id) {
+        const client = new W3CWebSocket(`ws://localhost:8000/ws/${user.id}`);
+
+        client.onopen = () => {
+            console.log('WebSocket Client Connected');
+        };
+
+        client.onmessage = (message) => {
+            const data = JSON.parse(message.data);
+            if (data.type === 'telemetry') {
+                setTelemetryData(data.payload);
+            } else if (data.type === 'log') {
+                setLogs(prevLogs => [...prevLogs, data.payload]);
+            } else if (data.status === 'processing') {
+                console.log('Processing request...');
+            } else if (data.status === 'complete') {
+                console.log('Response received:', data.response);
+            }
+        };
+
+        client.onclose = () => {
+            console.log('WebSocket Client Disconnected');
+        };
+
+        return () => {
+            client.close();
+        };
+    }
+  }, [user]);
 
   const handleDrawerToggle = () => {
     setMobileOpen(!mobileOpen);
@@ -99,29 +135,9 @@ const Dashboard = () => {
       case 'chat':
         return <ChatInterface />;
       case 'logs':
-        return <LogsManager />;
+        return <LogsManager logs={logs} />;
       case 'dashboard':
-        return (
-          <Box sx={{ p: 3 }}>
-            <Typography variant="h4" gutterBottom>
-              Analytics Dashboard
-            </Typography>
-            <Typography variant="body1" color="textSecondary">
-              Analytics and reporting features coming soon...
-            </Typography>
-          </Box>
-        );
-      case 'help':
-        return (
-          <Box sx={{ p: 3 }}>
-            <Typography variant="h4" gutterBottom>
-              Help & FAQ
-            </Typography>
-            <Typography variant="body1" color="textSecondary">
-              Help documentation and FAQ coming soon...
-            </Typography>
-          </Box>
-        );
+        return <SystemMonitoringDashboard data={telemetryData} />;
       default:
         return <ChatInterface />;
     }
